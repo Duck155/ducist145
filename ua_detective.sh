@@ -230,13 +230,19 @@ echo ""
 
 # Get device info from lsb-release
 if [ -f "/etc/lsb-release" ]; then
-    BOARD=$(grep CHROMEOS_RELEASE_BOARD /etc/lsb-release 2>/dev/null | cut -d= -f2)
+    BOARD_RAW=$(grep CHROMEOS_RELEASE_BOARD /etc/lsb-release 2>/dev/null | cut -d= -f2)
     CROS_VERSION=$(grep CHROMEOS_RELEASE_VERSION /etc/lsb-release 2>/dev/null | cut -d= -f2)
     CHROME_MILESTONE=$(grep CHROMEOS_RELEASE_CHROME_MILESTONE /etc/lsb-release 2>/dev/null | cut -d= -f2)
     TRACK=$(grep CHROMEOS_RELEASE_TRACK /etc/lsb-release 2>/dev/null | cut -d= -f2)
     
+    # Extract base board name (remove -signed-mp-* suffix and other variants)
+    BOARD=$(echo "$BOARD_RAW" | sed -E 's/-signed-mp-[^-]*$//' | sed -E 's/-he$//')
+    BOARD_BASE=$(echo "$BOARD" | cut -d'-' -f1)
+    
     print_info "Device Information:"
-    echo "  Board: ${BOARD:-unknown}"
+    echo "  Board (raw): ${BOARD_RAW:-unknown}"
+    echo "  Board (clean): ${BOARD:-unknown}"
+    echo "  Board (base): ${BOARD_BASE:-unknown}"
     echo "  Chrome OS Version: ${CROS_VERSION:-unknown}"
     echo "  Chrome Milestone: ${CHROME_MILESTONE:-unknown}"
     echo "  Release Track: ${TRACK:-unknown}"
@@ -263,15 +269,32 @@ if [ -f "/etc/lsb-release" ]; then
         if [ -f "$CSV_FILE" ] && [ -s "$CSV_FILE" ]; then
             print_success "Downloaded build database"
             
-            # Try to find this device's build info
-            if [ -n "$BOARD" ]; then
-                print_info "Searching for board: $BOARD"
+            # Try to find this device's build info - try multiple board name variants
+            if [ -n "$BOARD_BASE" ]; then
+                print_info "Searching for board variants in CSV..."
                 
-                # Look for the board in the CSV (handle board.model format)
-                BOARD_DATA=$(grep -i "^$BOARD" "$CSV_FILE" | head -1)
+                # Try exact match first, then base board
+                BOARD_DATA=""
+                for SEARCH_BOARD in "$BOARD_RAW" "$BOARD" "$BOARD_BASE"; do
+                    if [ -n "$SEARCH_BOARD" ]; then
+                        echo "  Trying: $SEARCH_BOARD"
+                        BOARD_DATA=$(grep -i "^$SEARCH_BOARD," "$CSV_FILE" | head -1)
+                        if [ -n "$BOARD_DATA" ]; then
+                            print_success "Found match for: $SEARCH_BOARD"
+                            break
+                        fi
+                        # Also try with dot notation (board.model)
+                        BOARD_DATA=$(grep -i "^$SEARCH_BOARD\." "$CSV_FILE" | head -1)
+                        if [ -n "$BOARD_DATA" ]; then
+                            print_success "Found match for: $SEARCH_BOARD.*"
+                            break
+                        fi
+                    fi
+                done
                 
                 if [ -n "$BOARD_DATA" ]; then
                     print_success "Found board data in Chromium Dashboard!"
+                    echo ""
                     
                     # Determine which channel to use based on track
                     if [[ "$TRACK" =~ "stable" ]]; then
@@ -292,23 +315,53 @@ if [ -f "/etc/lsb-release" ]; then
                         CROS_COL=5
                     fi
                     
-                    # Parse the CSV data
-                    CHROME_VERSION=$(echo "$BOARD_DATA" | cut -d',' -f$CR_COL)
-                    CHROMEOS_VERSION=$(echo "$BOARD_DATA" | cut -d',' -f$CROS_COL)
+                    # Parse the CSV data (using awk for better CSV parsing)
+                    CHROME_VERSION=$(echo "$BOARD_DATA" | awk -F',' "{print \$$CR_COL}")
+                    CHROMEOS_VERSION=$(echo "$BOARD_DATA" | awk -F',' "{print \$$CROS_COL}")
                     
-                    echo ""
-                    print_info "Data from $CHANNEL channel:"
+                    print_info "Latest $CHANNEL channel builds for this board:"
                     echo "  Chrome Version: $CHROME_VERSION"
                     echo "  Chrome OS Version: $CHROMEOS_VERSION"
+                    
+                    # Compare with actual system version
+                    if [ "$CHROMEOS_VERSION" = "$CROS_VERSION" ]; then
+                        print_success "✓ System version matches $CHANNEL channel perfectly!"
+                    else
+                        print_info "Note: Your system version ($CROS_VERSION) differs from latest $CHANNEL ($CHROMEOS_VERSION)"
+                        print_info "This means your device may be on an older build or different channel"
+                        
+                        # Try to find the exact version in other channels
+                        echo ""
+                        print_info "Checking all channels for your exact version..."
+                        for col in 5 7 9; do
+                            CH_VERSION=$(echo "$BOARD_DATA" | awk -F',' "{print \$$col}")
+                            if [ "$CH_VERSION" = "$CROS_VERSION" ]; then
+                                case $col in
+                                    5) CH_NAME="stable" ;;
+                                    7) CH_NAME="beta" ;;
+                                    9) CH_NAME="dev" ;;
+                                esac
+                                print_success "Found match in $CH_NAME channel!"
+                                CHANNEL="$CH_NAME"
+                                CR_COL=$((col - 1))
+                                CHROME_VERSION=$(echo "$BOARD_DATA" | awk -F',' "{print \$$CR_COL}")
+                            fi
+                        done
+                    fi
+                    
                     echo ""
                     
                     # Construct the user agent
-                    if [ -n "$CHROME_VERSION" ] && [ -n "$CHROMEOS_VERSION" ]; then
-                        print_success "Reconstructed User Agent (High Confidence):"
+                    if [ -n "$CHROME_VERSION" ] && [ "$CHROME_VERSION" != "no update" ]; then
+                        print_success "EXACT User Agent (from Chromium Dashboard):"
                         echo ""
-                        echo "Mozilla/5.0 (X11; CrOS $ARCH_UA $CHROMEOS_VERSION) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$CHROME_VERSION Safari/537.36"
+                        echo "Mozilla/5.0 (X11; CrOS $ARCH_UA $CROS_VERSION) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$CHROME_VERSION Safari/537.36"
+                        echo ""
+                        print_info "Note: This is the precise Chrome version for your ChromeOS build!"
                         echo ""
                         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+                    else
+                        print_info "Using milestone-based fallback (Chrome version = $CHROME_MILESTONE.0.0.0)"
                     fi
                 else
                     print_info "Board not found in database, using system info"
