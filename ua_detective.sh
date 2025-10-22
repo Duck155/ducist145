@@ -223,23 +223,119 @@ if [ -n "$CHROME_VERSION" ]; then
     print_success "Chrome version: $CHROME_VERSION"
 fi
 
-# Method 10: Standard User Agent Pattern
-print_section "Method 10: Expected Chrome OS User Agent Pattern"
-echo "Based on Chrome OS standards, your kiosk user agent likely follows this pattern:"
-echo ""
-echo "Mozilla/5.0 (X11; CrOS x86_64 [VERSION]) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/[CHROME_VERSION] Safari/537.36"
+# Method 10: Accurate User Agent Reconstruction from Chromium Dash
+print_section "Method 10: Accurate User Agent Reconstruction"
+echo "Downloading latest Chrome OS builds data from Chromium Dashboard..."
 echo ""
 
+# Get device info from lsb-release
 if [ -f "/etc/lsb-release" ]; then
+    BOARD=$(grep CHROMEOS_RELEASE_BOARD /etc/lsb-release 2>/dev/null | cut -d= -f2)
     CROS_VERSION=$(grep CHROMEOS_RELEASE_VERSION /etc/lsb-release 2>/dev/null | cut -d= -f2)
-    CHROME_VER=$(grep CHROMEOS_RELEASE_CHROME_MILESTONE /etc/lsb-release 2>/dev/null | cut -d= -f2)
+    CHROME_MILESTONE=$(grep CHROMEOS_RELEASE_CHROME_MILESTONE /etc/lsb-release 2>/dev/null | cut -d= -f2)
+    TRACK=$(grep CHROMEOS_RELEASE_TRACK /etc/lsb-release 2>/dev/null | cut -d= -f2)
     
-    if [ -n "$CROS_VERSION" ] && [ -n "$CHROME_VER" ]; then
-        print_success "Reconstructed likely User Agent:"
+    print_info "Device Information:"
+    echo "  Board: ${BOARD:-unknown}"
+    echo "  Chrome OS Version: ${CROS_VERSION:-unknown}"
+    echo "  Chrome Milestone: ${CHROME_MILESTONE:-unknown}"
+    echo "  Release Track: ${TRACK:-unknown}"
+    echo ""
+    
+    # Determine architecture
+    ARCH=$(uname -m)
+    if [ "$ARCH" = "x86_64" ]; then
+        ARCH_UA="x86_64"
+    elif [ "$ARCH" = "aarch64" ]; then
+        ARCH_UA="aarch64"
+    elif [[ "$ARCH" =~ arm ]]; then
+        ARCH_UA="armv7l"
+    else
+        ARCH_UA="x86_64"
+    fi
+    
+    # Download the CSV
+    CSV_FILE="/tmp/chromeos_builds.csv"
+    if command -v curl &> /dev/null; then
+        print_info "Downloading Chromium Dash serving builds..."
+        curl -sSL "https://chromiumdash.appspot.com/cros/download_serving_builds_csv?deviceCategory=ChromeOS" -o "$CSV_FILE" 2>/dev/null
+        
+        if [ -f "$CSV_FILE" ] && [ -s "$CSV_FILE" ]; then
+            print_success "Downloaded build database"
+            
+            # Try to find this device's build info
+            if [ -n "$BOARD" ]; then
+                print_info "Searching for board: $BOARD"
+                
+                # Look for the board in the CSV (handle board.model format)
+                BOARD_DATA=$(grep -i "^$BOARD" "$CSV_FILE" | head -1)
+                
+                if [ -n "$BOARD_DATA" ]; then
+                    print_success "Found board data in Chromium Dashboard!"
+                    
+                    # Determine which channel to use based on track
+                    if [[ "$TRACK" =~ "stable" ]]; then
+                        CHANNEL="stable"
+                        CR_COL=4
+                        CROS_COL=5
+                    elif [[ "$TRACK" =~ "beta" ]]; then
+                        CHANNEL="beta"
+                        CR_COL=6
+                        CROS_COL=7
+                    elif [[ "$TRACK" =~ "dev" ]]; then
+                        CHANNEL="dev"
+                        CR_COL=8
+                        CROS_COL=9
+                    else
+                        CHANNEL="stable (default)"
+                        CR_COL=4
+                        CROS_COL=5
+                    fi
+                    
+                    # Parse the CSV data
+                    CHROME_VERSION=$(echo "$BOARD_DATA" | cut -d',' -f$CR_COL)
+                    CHROMEOS_VERSION=$(echo "$BOARD_DATA" | cut -d',' -f$CROS_COL)
+                    
+                    echo ""
+                    print_info "Data from $CHANNEL channel:"
+                    echo "  Chrome Version: $CHROME_VERSION"
+                    echo "  Chrome OS Version: $CHROMEOS_VERSION"
+                    echo ""
+                    
+                    # Construct the user agent
+                    if [ -n "$CHROME_VERSION" ] && [ -n "$CHROMEOS_VERSION" ]; then
+                        print_success "Reconstructed User Agent (High Confidence):"
+                        echo ""
+                        echo "Mozilla/5.0 (X11; CrOS $ARCH_UA $CHROMEOS_VERSION) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$CHROME_VERSION Safari/537.36"
+                        echo ""
+                        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+                    fi
+                else
+                    print_info "Board not found in database, using system info"
+                fi
+            fi
+            
+            rm -f "$CSV_FILE"
+        else
+            print_fail "Failed to download build database"
+        fi
+    else
+        print_info "curl not available, skipping CSV download"
+    fi
+    
+    # Fallback to local system info
+    if [ -n "$CROS_VERSION" ] && [ -n "$CHROME_MILESTONE" ]; then
         echo ""
-        echo "Mozilla/5.0 (X11; CrOS x86_64 $CROS_VERSION) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$CHROME_VER.0.0.0 Safari/537.36"
+        print_info "Fallback User Agent (from local system info):"
+        echo ""
+        echo "Mozilla/5.0 (X11; CrOS $ARCH_UA $CROS_VERSION) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$CHROME_MILESTONE.0.0.0 Safari/537.36"
         echo ""
     fi
+else
+    print_fail "/etc/lsb-release not found"
+    echo ""
+    echo "Standard Chrome OS User Agent pattern:"
+    echo "Mozilla/5.0 (X11; CrOS x86_64 [VERSION]) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/[CHROME_VERSION] Safari/537.36"
 fi
 
 # Summary
