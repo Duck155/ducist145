@@ -324,29 +324,70 @@ if [ -f "/etc/lsb-release" ]; then
                     echo "  Chrome OS Version: $CHROMEOS_VERSION"
                     
                     # Compare with actual system version
+                    EXACT_MATCH=false
                     if [ "$CHROMEOS_VERSION" = "$CROS_VERSION" ]; then
-                        print_success "✓ System version matches $CHANNEL channel perfectly!"
+                        print_success "✓ System version matches latest $CHANNEL channel perfectly!"
+                        EXACT_MATCH=true
                     else
                         print_info "Note: Your system version ($CROS_VERSION) differs from latest $CHANNEL ($CHROMEOS_VERSION)"
-                        print_info "This means your device may be on an older build or different channel"
-                        
-                        # Try to find the exact version in other channels
+                        print_info "Searching for your exact version in CSV..."
                         echo ""
-                        print_info "Checking all channels for your exact version..."
-                        for col in 5 7 9; do
-                            CH_VERSION=$(echo "$BOARD_DATA" | awk -F',' "{print \$$col}")
-                            if [ "$CH_VERSION" = "$CROS_VERSION" ]; then
-                                case $col in
-                                    5) CH_NAME="stable" ;;
-                                    7) CH_NAME="beta" ;;
-                                    9) CH_NAME="dev" ;;
-                                esac
-                                print_success "Found match in $CH_NAME channel!"
-                                CHANNEL="$CH_NAME"
-                                CR_COL=$((col - 1))
-                                CHROME_VERSION=$(echo "$BOARD_DATA" | awk -F',' "{print \$$CR_COL}")
+                        
+                        # Search all channels for exact ChromeOS version match
+                        for ch_idx in "4,5,stable" "6,7,beta" "8,9,dev"; do
+                            IFS=',' read -r cr_col cros_col ch_name <<< "$ch_idx"
+                            CH_CROS_VERSION=$(echo "$BOARD_DATA" | awk -F',' "{print \$$cros_col}")
+                            if [ "$CH_CROS_VERSION" = "$CROS_VERSION" ]; then
+                                CH_CHROME_VERSION=$(echo "$BOARD_DATA" | awk -F',' "{print \$$cr_col}")
+                                print_success "✓ Found exact match in $ch_name channel!"
+                                CHANNEL="$ch_name"
+                                CHROME_VERSION="$CH_CHROME_VERSION"
+                                EXACT_MATCH=true
+                                break
                             fi
                         done
+                        
+                        # If not found in current channels, search historical milestone columns
+                        if [ "$EXACT_MATCH" = "false" ] && [ -n "$CHROME_MILESTONE" ]; then
+                            print_info "Checking historical milestone columns for Chrome $CHROME_MILESTONE..."
+                            
+                            # The CSV has columns like cr_141,cros_141,cr_140,cros_140,etc
+                            # We need to find the column index for our milestone
+                            HEADER=$(head -1 "$CSV_FILE")
+                            
+                            # Look for cr_XXX column where XXX is our milestone
+                            CR_MILESTONE_COL=$(echo "$HEADER" | awk -F',' -v milestone="$CHROME_MILESTONE" '{
+                                for(i=1; i<=NF; i++) {
+                                    if($i == "cr_"milestone) {
+                                        print i
+                                        exit
+                                    }
+                                }
+                            }')
+                            
+                            if [ -n "$CR_MILESTONE_COL" ] && [ "$CR_MILESTONE_COL" -gt 0 ]; then
+                                CROS_MILESTONE_COL=$((CR_MILESTONE_COL + 1))
+                                
+                                MILESTONE_CHROME=$(echo "$BOARD_DATA" | awk -F',' "{print \$$CR_MILESTONE_COL}")
+                                MILESTONE_CROS=$(echo "$BOARD_DATA" | awk -F',' "{print \$$CROS_MILESTONE_COL}")
+                                
+                                if [ "$MILESTONE_CROS" = "$CROS_VERSION" ]; then
+                                    print_success "✓ Found exact match in milestone $CHROME_MILESTONE history!"
+                                    echo "  Chrome Version: $MILESTONE_CHROME"
+                                    echo "  Chrome OS Version: $MILESTONE_CROS"
+                                    CHROME_VERSION="$MILESTONE_CHROME"
+                                    EXACT_MATCH=true
+                                elif [ -n "$MILESTONE_CHROME" ] && [ "$MILESTONE_CHROME" != "no update" ]; then
+                                    print_info "Found milestone $CHROME_MILESTONE data (ChromeOS $MILESTONE_CROS)"
+                                    if [ -z "$CHROME_VERSION" ] || [ "$CHROME_VERSION" = "no update" ]; then
+                                        print_info "Using milestone $CHROME_MILESTONE Chrome version as best match"
+                                        CHROME_VERSION="$MILESTONE_CHROME"
+                                    fi
+                                fi
+                            else
+                                print_info "Milestone column cr_$CHROME_MILESTONE not found in CSV"
+                            fi
+                        fi
                     fi
                     
                     echo ""
